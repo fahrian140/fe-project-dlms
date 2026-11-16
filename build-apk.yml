@@ -1,0 +1,79 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Siapkan folder www
+        run: |
+          mkdir -p www
+          cp index.html ble-shim.js www/
+
+      - name: Install dan buat proyek Android
+        run: |
+          npm install
+          npx cap add android
+
+      - name: Ikon, izin Bluetooth dan versi
+        run: |
+          pip install pillow
+          python3 - <<'PY'
+          import re, shutil, pathlib, os
+          from PIL import Image
+          res = pathlib.Path('android/app/src/main/res')
+          shutil.rmtree(res / 'mipmap-anydpi-v26', ignore_errors=True)
+          sizes = {'mdpi': 48, 'hdpi': 72, 'xhdpi': 96, 'xxhdpi': 144, 'xxxhdpi': 192}
+          icon = Image.open('icon.png').convert('RGB')
+          for d, px in sizes.items():
+              out = res / ('mipmap-' + d)
+              out.mkdir(parents=True, exist_ok=True)
+              im = icon.resize((px, px), Image.LANCZOS)
+              for n in ('ic_launcher', 'ic_launcher_round', 'ic_launcher_foreground'):
+                  im.save(out / (n + '.png'))
+          mf = pathlib.Path('android/app/src/main/AndroidManifest.xml')
+          s = mf.read_text()
+          perms = [
+            '<uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />',
+            '<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />',
+            '<uses-permission android:name="android.permission.BLUETOOTH_SCAN" />',
+            '<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />',
+            '<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />',
+            '<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />',
+            '<uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />',
+          ]
+          add = ''.join('    ' + p + '\n' for p in perms if p.split('"')[1] not in s)
+          s = s.replace('</manifest>', add + '</manifest>')
+          if 'screenOrientation' not in s:
+              s = s.replace('<activity', '<activity\n            android:screenOrientation="sensorLandscape"', 1)
+          mf.write_text(s)
+          g = pathlib.Path('android/app/build.gradle')
+          g.write_text(re.sub(r'versionCode \d+', 'versionCode ' + os.environ['GITHUB_RUN_NUMBER'], g.read_text()))
+          PY
+
+      - name: Build APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk ../dlms.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dlms-apk
+          path: dlms.apk
